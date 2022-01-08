@@ -1,0 +1,114 @@
+version: 2.1
+orbs:
+  slack: circleci/slack@4.1.1
+workflows:
+  main:
+    jobs:
+      - lint_build_test_deploy:
+          context:
+            - Main Config
+          filters:
+            branches:
+              ignore:
+                - master
+                - /cms\/.*/
+#      - hold_for_deploy:
+#          type: approval
+#          requires:
+#            - lint_build_test_locally
+#      - integration_testing:
+#          requires:
+#            - hold_for_deploy
+jobs:
+  lint_build_test_deploy:
+    docker:
+      - image: circleci/node:16.13.1
+    steps:
+      - checkout
+      - run:
+          name: Checking only 1 PR present
+          command: |
+            if [ "$CIRCLE_PULL_REQUEST" != "$CIRCLE_PULL_REQUESTS" ];
+            then
+              echo "There should be 1 PR with ${CIRCLE_BRANCH} is the source branch"
+              echo "Please remove on of ${$CIRCLE_PULL_REQUESTS}"
+              exit 1
+            fi
+      - restore_cache:
+          keys:
+            - v7-dependencies-{{ checksum "package-lock.json" }}
+            - v7-dependencies-
+      - run:
+          name: Installing dependencies
+          command: npm install
+      - save_cache:
+          key: v7-dependencies-{{ checksum "package-lock.json" }}
+          paths:
+            - node_modules
+      - run:
+          name: Linting sourcecode
+          command: npm run lint
+      - run:
+          name: Optimizing images
+          command: npm run optimize
+      - run:
+          name: Merging target branch into current branch
+          command: |
+            if [[ -n ${CIRCLE_PR_NUMBER} ]]
+            then
+            curl -L "https://github.com/stedolan/jq/releases/download/jq-1.6/jq-osx64" -o jq
+            chmod +x jq
+            target_branch=$(
+              curl https://api.github.com/repos/matchii-dev/web-client/pulls/${CIRCLE_PR_NUMBER} --header "Authorization: token $GITHUB_TOKEN" | ./jq '.base.ref' | tr -d '"'
+            )
+            git merge origin $target_branch -m "Merging $target_branch into $CIRCLE_BRANCH"
+            git push --set-upstream origin ${CIRCLE_BRANCH}
+            fi
+#      - run:
+#          name: Running local tests
+#          command: npm test
+      - store_test_results:
+          path: test-results
+      - store_artifacts:
+          path: test-results
+      - restore_cache:
+          keys:
+            - v7-gatsby-cache-
+      - run:
+          name: Building with Netlify settings
+          command: export GATSBY_BASE_BRANCH=${CIRCLE_BRANCH} && npx netlify build
+      - save_cache:
+          key: v7-gatsby-cache-{{ epoch }}
+          paths:
+            - .cache
+            - public
+      - run:
+          name: Uploading storybook to Chromatic and running visual tests
+          command: npm run chromatic
+      - run:
+          name: Deploying to staging
+          command: npx netlify deploy -p
+      - when:
+          condition:
+            equal: [develop, << pipeline.git.branch >>]
+          steps:
+            - run:
+                name: Reset bundle file if on develop
+                command: git checkout @ -- bundle-report.html
+      - run:
+          name: Commiting and pushing changes (if any)
+          command: |
+            git config --global user.email "minh.hoang1297@gmail.com"
+            git config --global user.name "Hoang Nguyen"
+            (git commit -am "Lint and format [ci skip]" && git push --set-upstream origin ${CIRCLE_BRANCH}) || :
+  #      - run:
+  #          name: Send request to build staging preview app in netlify
+  #          command: curl -X POST -d '{}' "${STAGING_BUILD_HOOK}?trigger_branch=${CIRCLE_BRANCH}&trigger_title=Triggered+by+CircleCI+workflow+${CIRCLE_WORKFLOW_ID}"
+  #      - slack/notify:
+  #          event: fail
+  #          template: basic_fail_1
+  integration_testing:
+    docker:
+      - image: circleci/node:14.15.1
+    steps:
+      - run: echo "Integration Testing will happen on this workflow"
